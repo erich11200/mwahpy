@@ -187,8 +187,10 @@ def read_output(f, start=None, stop=None):
     # Map data to kwargs for Timestep class
     for col_name in column_names:
         # Handle special cases for column name mapping
-        if col_name == 'ignore':
+        if col_name == 'ignore': #pre-1.97 files: 0 = baryon, 1 = DM
             timestep_kwargs['typ'] = array_dict[col_name]
+        elif col_name == 'type': #1.97+ files: signed body type (negative = DM, positive = baryon)
+            timestep_kwargs['body_type'] = array_dict[col_name]
         elif col_name == 'id':
             timestep_kwargs['id_val'] = array_dict[col_name]
         elif col_name == 'v_x':
@@ -224,8 +226,13 @@ def read_input(f):
 
     f = open(f, 'r')
 
-    #remove the header
-    f.readline()
+    #check the header to see which body type format the file uses
+    #(same check as the N-body client: a '#' first line containing 'type' means
+    #the 1.97+ signed type format, anything else is the old 0 = baryon / 1 = DM format)
+    first_line = f.readline()
+    new_type_format = first_line.startswith('#') and ('type' in first_line)
+    if not first_line.startswith('#'): #no header, so the first line is data
+        f.seek(0)
 
     #store the data here temporarily
     array_dict = {0:[], 1:[], 2:[], 3:[], 4:[], 5:[], 6:[], 7:[], 8:[]}
@@ -234,7 +241,9 @@ def read_input(f):
     if progress_bars:
         j = 0
     for line in f:
-        line = line.strip().split('\t')
+        if line.startswith('#') or line.strip() == '': #skip comments and blank lines, like the client does
+            continue
+        line = line.strip().split()
         i = 0
         while i < len(line):
             array_dict[i].append(float(line[i]))
@@ -249,7 +258,11 @@ def read_input(f):
         num_objects = len(next(iter(array_dict.values()))) if array_dict else 0
         print('\n'+ str(num_objects) + ' objects read in')
         print('\rConverting data...', end='')
-    d = Timestep(typ=array_dict[0], id_val=array_dict[1], x=array_dict[2], y=array_dict[3], z=array_dict[4], vx=array_dict[5], vy=array_dict[6], vz=array_dict[7], mass=array_dict[8], center_of_mass=[0,0,0], center_of_momentum=[0,0,0])
+    if new_type_format:
+        type_kwargs = {'body_type': array_dict[0]}
+    else:
+        type_kwargs = {'typ': array_dict[0]}
+    d = Timestep(**type_kwargs, id_val=array_dict[1], x=array_dict[2], y=array_dict[3], z=array_dict[4], vx=array_dict[5], vy=array_dict[6], vz=array_dict[7], mass=array_dict[8], center_of_mass=[0,0,0], center_of_momentum=[0,0,0])
     if verbose:
         print('done')
 
@@ -370,8 +383,11 @@ def read_histogram(hist_file_path):
                     hist.quadrupoleMoments = line[4]
                     #print(hist.quadrupoleMoments)
                 #Eps (softening length in kpc)
+                #   pre-1.97: '# Eps = 0.1'; 1.97+: '# Eps = {0.1, 0.2, 0.3}'
+                #   a single value stays a float, several become a list of floats
                 if (line[1]=='Eps'):
-                    hist.eps = float(line[3])
+                    eps_vals = [float(v) for v in ' '.join(line[3:]).replace('{', ' ').replace('}', ' ').replace(',', ' ').split()]
+                    hist.eps = eps_vals[0] if len(eps_vals) == 1 else eps_vals
                     #print(hist.eps)
                 #Bar time error in Gyr and bar angle error in radians
                 if (line[1]=='Bar'):
@@ -538,29 +554,43 @@ def hist_to_df(hist):
 
 #parses a Timestep class object and outputs a file that can be read into a
 #MilkyWay@home N-body simulation as the 'manual bodies' parameter
-def make_nbody_input(t, f, recenter=True):
+def make_nbody_input(t, f, recenter=True, legacy=False):
     #t (Timestep): the Timestep object that will be printed out
     #f (str): the path of the file that will be printed to
+    #legacy (bool): if True, write the pre-1.97 '#ignore' format (0 = baryon, 1 = DM).
+    #   If False (default), write the 1.97+ '#type' format (signed body types:
+    #   negative = dark matter, positive = baryons/light matter, 0 is not allowed)
     if verbose:
         print('Writing Timestep as N-body input to '+f+'...')
 
     if recenter:
         t.recenter()
 
+    body_type = np.array(t.body_type).astype(int) #signed body types (negative = DM, positive = baryon)
+
+    if legacy:
+        header = '#ignore'
+        out_type = (body_type < 0).astype(int) #DM -> 1, baryon -> 0
+    else:
+        header = '#type'
+        out_type = body_type
+        if np.any(out_type == 0):
+            raise ValueError('Body type 0 is reserved for tree cells in MilkyWay@home N-body; '
+                             'use negative values for dark matter and positive for baryons.')
+
     f = open(f, 'w')
-    f.write('#ignore\tid\tx\ty\tz\tvx\tvy\tvz\tm')
+    f.write(header + '\tid\tx\ty\tz\tvx\tvy\tvz\tm')
 
     i = 0
 
     while i < len(t):
-        f.write('\n{}\t{}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{} '.format(t.typ[i], t.id[i], t.x[i], t.y[i], t.z[i], t.vx[i], t.vy[i], t.vz[i], t.mass[i]))
-        #f.write('\n'+str(1)+' '+str(t.id[i])+' '+str(t.x[i])+' '+str(t.y[i])+' '+str(t.z[i])+' '+\
-        #        str(t.vx[i])+' '+str(t.vy[i])+' '+str(t.vz[i])+' '+str(t.mass[i]))
+        f.write('\n{}\t{}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{:.6f}\t{} '.format(out_type[i], t.id[i], t.x[i], t.y[i], t.z[i], t.vx[i], t.vy[i], t.vz[i], t.mass[i]))
         if progress_bars:
             progress_bar(i, len(t))
         i += 1
 
     f.write('\n')
+    f.close()
 
     if verbose:
         print('\ndone')
