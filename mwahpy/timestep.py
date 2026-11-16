@@ -44,7 +44,7 @@ class AttrDict(dict):
 
 class Timestep():
 
-    def __init__(self, typ=list(), id_val=list(), x=list(), y=list(), z=list(), vx=list(), vy=list(), vz=list(), mass=list(), center_of_mass=[0, 0, 0], center_of_momentum=[0, 0, 0], potential=None, time=None, nbody=None, **kwargs):
+    def __init__(self, typ=list(), id_val=list(), x=list(), y=list(), z=list(), vx=list(), vy=list(), vz=list(), mass=list(), center_of_mass=[0, 0, 0], center_of_momentum=[0, 0, 0], potential=None, time=None, nbody=None, body_type=None, **kwargs):
         #all this is typically specified by the read_output function in output_handler
         #read_output is the preferred way to input data to this data structure
         #but if you're really feeling adventurous you can always do it yourself
@@ -65,7 +65,17 @@ class Timestep():
 
         #-----------------------------------------------------------------------
 
-        self.typ = np.array(typ).astype('int')   #0 if baryon, 1 if DM
+        #body types: MilkyWay@home N-body v1.97+ writes the signed particle type
+        #   (negative = dark matter, positive = baryons, and there can be several of each,
+        #   e.g. one per dwarf structure). Older versions wrote a 0 (baryon) / 1 (DM) flag.
+        #   typ always keeps the old 0/1 meaning so existing scripts work;
+        #   body_type always holds the signed type. Either one can be given; the other is derived.
+        if body_type is not None and len(body_type) > 0:
+            self.body_type = np.array(body_type).astype('int')
+            self.typ = (self.body_type < 0).astype('int')   #0 if baryon, 1 if DM
+        else:
+            self.typ = np.array(typ).astype('int')   #0 if baryon, 1 if DM
+            self.body_type = np.where(self.typ == 0, 1, -1).astype('int') #same mapping as the N-body client (BODY())
         self.id = np.array(id_val).astype('int') #does not need to be unique ID
         self.x = np.array(x)       #Galactocentric Cartesian positions
         self.y = np.array(y)
@@ -106,7 +116,7 @@ class Timestep():
 
         #this has to be manually updated any time a new iterable quantity is added
         #to the Timestep class. This allows us to control what values are iterated over.
-        self.index_list = ['typ', 'id', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'mass']
+        self.index_list = ['typ', 'body_type', 'id', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'mass']
         self.index = 0
 
         #these should initially be set to false. If the user tries to get a value
@@ -191,6 +201,7 @@ class Timestep():
     #replaces this Timestep with a blank Timestep
     def reset(self):
         self.typ = np.array([])
+        self.body_type = np.array([])
         self.id = np.array([])
         self.x = np.array([])
         self.y = np.array([])
@@ -207,7 +218,7 @@ class Timestep():
         self.nbody = None
         self.potential = None
 
-        self.index_list = ['typ', 'id', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'mass']
+        self.index_list = ['typ', 'body_type', 'id', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'mass']
         self.index = 0
 
         self.have_basic = False
@@ -528,15 +539,19 @@ class Timestep():
         for i in data_list:
             self.append_timestep(i)
 
-    #cut the Timestep so only baryons (typ==0) remain
+    #cut the Timestep so only baryons (body_type > 0) remain
     def only_baryons(self):
-        #nasty one liner
-        self.take(np.nonzero((self.typ == 0).astype(int))[0])
+        self.take(np.nonzero(self.body_type > 0)[0])
 
-    #cut the Timestep so only dark matter particles (typ==1) remain
+    #cut the Timestep so only dark matter particles (body_type < 0) remain
     def only_dark_matter(self):
-        #nasty one liner
-        self.take(np.nonzero((self.typ == 1).astype(int))[0])
+        self.take(np.nonzero(self.body_type < 0)[0])
+
+    #cut the Timestep so only particles of the given signed body type(s) remain
+    #(e.g. only_type([1, -1]) keeps the baryons and DM of one dwarf structure)
+    def only_type(self, types):
+        #types (int or array-like): the body type(s) to keep
+        self.take(np.nonzero(np.isin(self.body_type, np.atleast_1d(types)))[0])
 
     #---------------------------------------------------------------------------
     # OUTPUT
@@ -811,8 +826,8 @@ def get_bound_mass(t):
     self_energies = get_self_energies(t)
 
     bound = (self_energies < 0)
-    bary = (t.typ == 0)
-    dm = (t.typ == 1)
+    bary = (t.body_type > 0)
+    dm = (t.body_type < 0)
 
     return np.sum(t.mass[bound]), np.sum(t.mass[bound*bary]), np.sum(t.mass[bound*dm])
 
