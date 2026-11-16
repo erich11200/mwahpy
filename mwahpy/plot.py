@@ -176,8 +176,8 @@ def fancy_plot(t, ax1, ax2, show=False, ax=None, bg_url=default_fancy_background
                 fontsize=20, zorder=1000, horizontalalignment='left', verticalalignment='bottom')
 
     #split up into dark and baryonic matter
-    bm_indx = (t.typ == 0)
-    dm_indx = (t.typ == 1)
+    bm_indx = (t.body_type > 0)
+    dm_indx = (t.body_type < 0)
 
     x_bm = t[ax1][bm_indx]
     y_bm = t[ax2][bm_indx]
